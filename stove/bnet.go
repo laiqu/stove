@@ -9,6 +9,7 @@ import (
 	"net"
 	"io"
     "time"
+    "runtime/debug"
 )
 
 const (
@@ -18,6 +19,7 @@ const (
 
 func check(e error) {
 	if e != nil {
+        debug.PrintStack()
 		panic(e)
 	}
 }
@@ -73,7 +75,14 @@ func HashToName (hash uint32) string {
 }
 
 func (session *session) handleRequest(packet []byte) int {
+    if len(packet) < 2 {
+        return -1
+    }
 	headerSize := binary.BigEndian.Uint16(packet)
+    if 2 + int(headerSize) > len(packet) {
+        fmt.Printf("CO DO KURWY %d\n", int(headerSize))
+        return -2
+    }
 	headerData := packet[2 : 2+int(headerSize)]
     fmt.Printf("%x\n", headerData)
 
@@ -85,6 +94,10 @@ func (session *session) handleRequest(packet []byte) int {
     }
 
 	packetEnd := 2 + int(headerSize) + int(header.GetSize())
+    if packetEnd > len(packet) {
+        fmt.Printf("SZTO? %d %d\n", header.GetSize(), packetEnd)
+        return -3
+    }
 	bodyData := packet[2+headerSize : packetEnd]
 
 	if header.GetServiceId() == 0 && header.GetMethodId() == 1 {
@@ -237,6 +250,15 @@ func (session *session) handleRequest(packet []byte) int {
             Status:    proto.Uint32(0),
         }
         session.writePacket(header, make([]byte, 0));
+    } else if header.GetServiceId() == 5 && header.GetMethodId() == 3 {
+        fmt.Println("Presence Update");
+        header = &hsproto.BnetProtocol_Header {
+            ServiceId: proto.Uint32(254),
+            Token:     proto.Uint32(header.GetToken()),
+            Size:      proto.Uint32(0),
+            Status:    proto.Uint32(0),
+        }
+        session.writePacket(header, make([]byte, 0));
     } else if header.GetServiceId() == 11 && header.GetMethodId() == 30 {
         fmt.Println("Account GetAccountState");
         count := "EU"
@@ -252,6 +274,22 @@ func (session *session) handleRequest(packet []byte) int {
                     Country: &count,
                     PreferredRegion: proto.Uint32(0),
                 },
+            },
+        }
+        data, err := proto.Marshal(resp)
+        check(err)
+        header = &hsproto.BnetProtocol_Header {
+            ServiceId: proto.Uint32(254),
+            Token:     proto.Uint32(header.GetToken()),
+            Size:      proto.Uint32(uint32(len(data))),
+            Status:    proto.Uint32(0),
+        }
+        session.writePacket(header, data);
+    } else if header.GetServiceId() == 11 && header.GetMethodId() == 34 {
+        fmt.Println("Account GetGameSessionInfo");
+        resp := &hsproto.BnetProtocolAccount_GetGameSessionInfoResponse {
+            SessionInfo: &hsproto.BnetProtocolAccount_GameSessionInfo {
+                StartTime: proto.Uint32(uint32(time.Now().Unix())),
             },
         }
         data, err := proto.Marshal(resp)
@@ -319,37 +357,437 @@ func (session *session) handleRequest(packet []byte) int {
             fmt.Println("Too many attributes in pegasus client request?");
         }
         packetType := int64(-1)
+        var pegasusData []byte;
         for _, att := range clientRequest.GetAttribute() {
-            fmt.Println(att.GetName())
+            //fmt.Println(att.GetName())
             if att.GetName() == "p" {
-                fmt.Printf("%x\n", att.GetValue().GetBlobValue())
+                //fmt.Printf("%x\n", att.GetValue().GetBlobValue())
                 blob := att.GetValue().GetBlobValue()
                 if len(blob) < 2 {
                     fmt.Println("blob is too short")
                 } else {
                     packetType = int64(blob[0]) + int64(blob[1]) << 8
+                    pegasusData = blob[2:]
                 }
             }
         }
-        fmt.Printf("packet type %d\n", packetType)
         name := "it shouldn't matter"
-        responseType := int64(packetType + 1) // looks like response type is request + 1
-        resp := &hsproto.BnetProtocolGameUtilities_ClientResponse {
-            Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
-                &hsproto.BnetProtocolAttribute_Attribute {
-                    Name: &name,
-                    Value: &hsproto.BnetProtocolAttribute_Variant {
-                        //IntValue: &packetType,
-                        IntValue: &responseType,
+        resp := &hsproto.BnetProtocolGameUtilities_ClientResponse {}
+        if packetType == 314 {
+            fmt.Println("pegasus 314 - subscribe")
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(315),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: []byte{},
+                        },
                     },
                 },
-                &hsproto.BnetProtocolAttribute_Attribute {
-                    Name: &name,
-                    Value: &hsproto.BnetProtocolAttribute_Variant {
-                        BlobValue: []byte{},
+            }
+        } else if packetType == 303 {
+            fmt.Println("pegasus 303 - get assets")
+            assetResp := &hsproto.PegasusUtil_AssetsVersionResponse {
+                Version: proto.Int32(7553),
+            }
+            assData, err := proto.Marshal(assetResp)
+            check(err)
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(304),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: assData,
+                        },
                     },
                 },
-            },
+            }
+        } else if packetType == 267 {
+            fmt.Println("pegasus 267 - check account licenses")
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(325),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: []byte{},
+                        },
+                    },
+                },
+            }
+        } else if packetType == 276 {
+            fmt.Println("pegasus 276 - check game licenses")
+            licResp := &hsproto.PegasusUtil_CheckLicensesResponse {
+                AccountLevel: proto.Bool(true),
+                Success: proto.Bool(true),
+            }
+            licData, err := proto.Marshal(licResp)
+            check(err)
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(277),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: licData,
+                        },
+                    },
+                },
+            }
+        } else if packetType == 205 {
+            fmt.Println("pegasus 205 - update login")
+            updResp := &hsproto.PegasusUtil_UpdateLoginComplete {
+            }
+            updData, err := proto.Marshal(updResp)
+            check(err)
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(307),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: updData,
+                        },
+                    },
+                },
+            }
+        } else if packetType == 201 {
+            fmt.Println("pegasus 201 - get account info")
+            accountInfoReq := &hsproto.PegasusUtil_GetAccountInfo{}
+            err := proto.Unmarshal(pegasusData, accountInfoReq)
+            check(err)
+            requestType := accountInfoReq.GetRequest()
+            fmt.Println(requestType)
+            attBlob := []byte{}
+            respType := int64(505)
+            if requestType == hsproto.PegasusUtil_GetAccountInfo_CAMPAIGN_INFO {
+                profileProgress := &hsproto.PegasusUtil_ProfileProgress {
+                    Progress: proto.Int64(6),
+                    BestForge: proto.Int32(10),
+                    LastForge: &hsproto.PegasusShared_Date {
+                        Year: proto.Int32(2015),
+                        Month: proto.Int32(3),
+                        Day: proto.Int32(31),
+                        Hours: proto.Int32(17),
+                        Min: proto.Int32(3),
+                        Sec: proto.Int32(54),
+                    },
+                }
+                attBlob, err = proto.Marshal(profileProgress)
+                check(err)
+                respType = 233
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_BOOSTERS {
+                boosters := &hsproto.PegasusUtil_BoosterList{}
+                attBlob, err = proto.Marshal(boosters)
+                check(err)
+                respType = 224
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_FEATURES {
+                features := &hsproto.PegasusUtil_GuardianVars {
+                    ShowUserUI: proto.Int32(1),
+                }
+                attBlob, err = proto.Marshal(features)
+                check(err)
+                respType = 264
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_MEDAL_INFO {
+                medalInfo := &hsproto.PegasusUtil_MedalInfo {
+                    SeasonWins: proto.Int32(0),
+                    Stars: proto.Int32(20),
+                    Streak: proto.Int32(0),
+                    StarLevel: proto.Int32(9),
+                    LevelStart: proto.Int32(20),
+                    LevelEnd: proto.Int32(3),
+                    CanLose: proto.Bool(true),
+                }
+                attBlob, err = proto.Marshal(medalInfo)
+                check(err)
+                respType = 232
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_NOTICES {
+                notices := &hsproto.PegasusUtil_ProfileNotices {}
+                attBlob, err = proto.Marshal(notices)
+                check(err)
+                respType = 212
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_DECK_LIST {
+                deckList := &hsproto.PegasusUtil_DeckList {}
+                attBlob, err = proto.Marshal(deckList)
+                check(err)
+                respType = 202
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_COLLECTION {
+                collection := &hsproto.PegasusUtil_Collection {}
+                attBlob, err = proto.Marshal(collection)
+                check(err)
+                respType = 207
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_DECK_LIMIT {
+                deckLimit := &hsproto.PegasusUtil_ProfileDeckLimit {
+                    DeckLimit: proto.Int32(9),
+                }
+                attBlob, err = proto.Marshal(deckLimit)
+                check(err)
+                respType = 231
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_CARD_VALUES {
+                cardValues := &hsproto.PegasusUtil_CardValues {
+                    CardNerfIndex: proto.Int32(5),
+                }
+                attBlob, err = proto.Marshal(cardValues)
+                check(err)
+                respType = 260
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_ARCANE_DUST_BALANCE {
+                arcaneDust := &hsproto.PegasusUtil_ArcaneDustBalance {
+                    Balance: proto.Int64(1337),
+                }
+                attBlob, err = proto.Marshal(arcaneDust)
+                check(err)
+                respType = 262
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_NOT_SO_MASSIVE_LOGIN {
+                notMassive := &hsproto.PegasusUtil_NotSoMassiveLoginReply {}
+                attBlob, err = proto.Marshal(notMassive)
+                check(err)
+                respType = int64(hsproto.PegasusUtil_NotSoMassiveLoginReply_PacketID_value["ID"])
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_REWARD_PROGRESS {
+                rewardProgress := &hsproto.PegasusUtil_RewardProgress {
+                    SeasonEnd: &hsproto.PegasusShared_Date {
+                        Year: proto.Int32(2015),
+                        Month: proto.Int32(4),
+                        Day: proto.Int32(30),
+                        Hours: proto.Int32(22),
+                        Min: proto.Int32(0),
+                        Sec: proto.Int32(0),
+                    },
+                    WinsPerGold: proto.Int32(3),
+                    GoldPerReward: proto.Int32(10),
+                    MaxGoldPerDay: proto.Int32(100),
+                    SeasonNumber: proto.Int32(18),
+                    XpSoloLimit: proto.Int32(60),
+                    MaxHeroLevel: proto.Int32(60),
+                    NextQuestCancel: &hsproto.PegasusShared_Date {
+                        Year: proto.Int32(2015),
+                        Month: proto.Int32(4),
+                        Day: proto.Int32(1),
+                        Hours: proto.Int32(0),
+                        Min: proto.Int32(0),
+                        Sec: proto.Int32(0),
+                    },
+                    EventTimingMod: proto.Float32(-0.0833333283662796),
+                }
+
+                attBlob, err = proto.Marshal(rewardProgress)
+                check(err)
+                respType = int64(hsproto.PegasusUtil_RewardProgress_PacketID_value["ID"])
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_BOOSTER_TALLY {
+                boosterTally := &hsproto.PegasusUtil_BoosterTallyList {}
+                attBlob, err = proto.Marshal(boosterTally)
+                check(err)
+                respType = int64(hsproto.PegasusUtil_BoosterTallyList_PacketID_value["ID"])
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_PLAYER_RECORD {
+                playerRecords := &hsproto.PegasusUtil_PlayerRecords {}
+                attBlob, err = proto.Marshal(playerRecords)
+                check(err)
+                respType = int64(hsproto.PegasusUtil_PlayerRecords_PacketID_value["ID"])
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_GOLD_BALANCE {
+                goldBalance := &hsproto.PegasusUtil_GoldBalance {
+                    CappedBalance: proto.Int64(1000),
+                    BonusBalance: proto.Int64(0),
+                    Cap: proto.Int64(999999),
+                    CapWarning: proto.Int64(999999),
+                }
+                attBlob, err = proto.Marshal(goldBalance)
+                check(err)
+                respType = int64(hsproto.PegasusUtil_GoldBalance_PacketID_value["ID"])
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_HERO_XP {
+                heroXP := &hsproto.PegasusUtil_HeroXP {
+                    XpInfos: make([]*hsproto.PegasusUtil_HeroXPInfo, 10),
+                }
+                for i := int32(2); i < 12; i++ {
+                    heroXP.XpInfos[i - 2] = &hsproto.PegasusUtil_HeroXPInfo {
+                        ClassId: proto.Int32(i),
+                        Level: proto.Int32(60),
+                        CurrXp: proto.Int64(1480),
+                        MaxXp: proto.Int64(1480),
+                    }
+                }
+                attBlob, err = proto.Marshal(heroXP)
+                check(err)
+                respType = int64(hsproto.PegasusUtil_HeroXP_PacketID_value["ID"])
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_CARD_BACKS {
+                cardBacks := &hsproto.PegasusUtil_CardBacks {
+                    DefaultCardBack: proto.Int32(13),
+                    CardBacks: make([]int32, 19),
+                }
+                for i := int32(1); i < 20; i++ {
+                    cardBacks.CardBacks[i - 1] = i
+                }
+                attBlob, err = proto.Marshal(cardBacks)
+                check(err)
+                respType = int64(hsproto.PegasusUtil_CardBacks_PacketID_value["ID"])
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_FAVORITE_HEROES {
+                playerRecords := &hsproto.PegasusUtil_FavoriteHeroesResponse {}
+                attBlob, err = proto.Marshal(playerRecords)
+                check(err)
+                respType = int64(hsproto.PegasusUtil_FavoriteHeroesResponse_PacketID_value["ID"])
+            } else if requestType == hsproto.PegasusUtil_GetAccountInfo_TAVERN_BRAWL_INFO {
+                tavernInfo := &hsproto.PegasusUtil_TavernBrawlInfo {}
+                attBlob, err = proto.Marshal(tavernInfo)
+                check(err)
+                respType = int64(hsproto.PegasusUtil_TavernBrawlInfo_PacketID_value["ID"])
+            }
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(respType),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: attBlob,
+                        },
+                    },
+                },
+            }
+        } else if packetType == 305 {
+            fmt.Println("pegasus 305 - adventure progress")
+            adventureProgress := &hsproto.PegasusUtil_AdventureProgressResponse {}
+            adventureData, err := proto.Marshal(adventureProgress)
+            check(err)
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(int64(hsproto.PegasusUtil_AdventureProgressResponse_PacketID_value["ID"])),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: adventureData,
+                        },
+                    },
+                },
+            }
+        } else if packetType == 240 {
+            fmt.Println("pegasus 240 - get options")
+            clientOptions := &hsproto.PegasusUtil_ClientOptions {}
+            clientData, err := proto.Marshal(clientOptions)
+            check(err)
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(int64(hsproto.PegasusUtil_ClientOptions_PacketID_value["ID"])),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: clientData,
+                        },
+                    },
+                },
+            }
+        } else if packetType == 237 {
+            fmt.Println("pegasus 237 - get battle pay status")
+            battlePayConfig := &hsproto.PegasusUtil_BattlePayConfigResponse {
+                Currency: proto.Int32(2),
+                Unavailable: proto.Bool(true),
+                SecsBeforeAutoCancel: proto.Int32(600),
+                GoldCostArena: proto.Int64(150),
+            }
+            battlePayData, err := proto.Marshal(battlePayConfig)
+            check(err)
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(int64(hsproto.PegasusUtil_BattlePayConfigResponse_PacketID_value["ID"])),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: battlePayData,
+                        },
+                    },
+                },
+            }
+        } else if packetType == 253 {
+            fmt.Println("pegasus 253 - get achieves")
+            achieves := &hsproto.PegasusUtil_Achieves {}
+            achievesData, err := proto.Marshal(achieves)
+            check(err)
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(int64(hsproto.PegasusUtil_Achieves_PacketID_value["ID"])),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: achievesData,
+                        },
+                    },
+                },
+            }
+        } else if int32(packetType) == hsproto.PegasusUtil_ValidateAchieve_PacketID_value["ID"] {
+            fmt.Println("pegasus get achieves")
+            validateAchieveReq := &hsproto.PegasusUtil_ValidateAchieve {}
+            err := proto.Unmarshal(pegasusData, validateAchieveReq)
+            achieves := &hsproto.PegasusUtil_ValidateAchieveResponse {
+                Achieve: proto.Int32(validateAchieveReq.GetAchieve()),
+            }
+            achievesData, err := proto.Marshal(achieves)
+            check(err)
+            resp = &hsproto.BnetProtocolGameUtilities_ClientResponse {
+                Attribute: []*hsproto.BnetProtocolAttribute_Attribute {
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            IntValue: proto.Int64(int64(hsproto.PegasusUtil_ValidateAchieveResponse_PacketID_value["ID"])),
+                        },
+                    },
+                    &hsproto.BnetProtocolAttribute_Attribute {
+                        Name: &name,
+                        Value: &hsproto.BnetProtocolAttribute_Variant {
+                            BlobValue: achievesData,
+                        },
+                    },
+                },
+            }
+        } else {
+            fmt.Printf("UNSOLVED packet type %d\n", packetType)
         }
         data, err := proto.Marshal(resp)
         check(err)
@@ -404,7 +842,19 @@ func (session *session) serve() {
 		for read > totalProcessed {
 			idx += read
 
+            fmt.Printf("%d %d %d\n",read, len(buf), idx)
 			processed := session.handleRequest(buf[:idx])
+            if processed < 0 {
+                fmt.Printf("packet too short %d\n", processed)
+                if idx != 0 {
+                    //t := idx
+                    //copy(buf, buf[idx:])
+                    //idx = len(buf) - t
+                    break
+                } else {
+                    buf = append(buf, make([]byte, len(buf)>>1)...)
+                }
+            }
 			totalProcessed += processed
 			idx -= processed
 			if processed > 0 && totalProcessed < read {
